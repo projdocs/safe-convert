@@ -56,7 +56,7 @@ func run() error {
 	userInstall := fmt.Sprintf("file:///tmp/lo-profile-%d", time.Now().UnixNano())
 
 	cmd := exec.Command(
-		"/usr/bin/libreoffice",
+		"/usr/lib/libreoffice/program/soffice",
 		"--headless",
 		"--norestore",
 		"--nofirststartwizard",

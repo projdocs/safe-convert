@@ -6,11 +6,11 @@ on:
       - main
     paths:
       - worker.Dockerfile
-      - worker.go
+      - cmd/worker/worker.go
   pull_request:
     paths:
       - worker.Dockerfile
-      - worker.go
+      - cmd/worker/worker.go
   workflow_dispatch:
 
 env:

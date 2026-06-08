@@ -48,7 +48,6 @@ RUN fc-cache -fv
 FROM debian:12-slim AS runtime
 
 COPY --from=installer /usr/lib/libreoffice   /usr/lib/libreoffice
-COPY --from=installer /usr/bin/libreoffice   /usr/bin/libreoffice
 COPY --from=installer /usr/share/libreoffice /usr/share/libreoffice
 COPY --from=installer /usr/share/fonts       /usr/share/fonts
 COPY --from=installer /etc/fonts             /etc/fonts
