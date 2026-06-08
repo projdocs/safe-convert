@@ -1,6 +1,8 @@
 # safe-convert
 
-A hardened, isolated microservice that converts documents to PDF using LibreOffice. Designed to be deployed as an internal Docker sidecar with no public internet exposure——callable only by a trusted API service over a private Docker network (with no other services attached, unless necessary).
+A hardened microservice that converts documents to PDF using LibreOffice. Each conversion runs inside a freshly spawned, ephemeral Docker container with no network interface, no shell, dropped capabilities, and hard resource limits. The container is destroyed immediately after the PDF is returned.
+
+**Not intended to be exposed to the internet.** It is a private sidecar, reachable only by a trusted upstream service over a closed internal network.
 
 ---
 
@@ -20,120 +22,115 @@ A hardened, isolated microservice that converts documents to PDF using LibreOffi
 
 ## Overview
 
-safe-convert exposes a single HTTP endpoint that accepts a document upload and returns a PDF. It is not a general-purpose conversion tool——it is built around the assumption that it will process **untrusted, potentially malicious files** and must contain any exploit within its own container boundary.
-
-**It is not intended to be exposed to the internet.** It lives on an isolated Docker network, reachable only by your own API.
+safe-convert exposes a single HTTP endpoint that accepts a document body and returns a PDF. It is not a general-purpose conversion tool — it is built around the assumption that it will process **untrusted, potentially malicious files** and must contain any exploit within the ephemeral worker container boundary.
 
 ---
 
 ## Threat Model
 
-Processing arbitrary user-uploaded documents is one of the more dangerous operations a backend service can perform. The threats safe-convert is designed to contain are:
+Processing arbitrary user-uploaded documents is one of the more dangerous operations a backend service can perform. The threats safe-convert is designed to contain:
 
-**Malicious document exploits.** LibreOffice has a long CVE history. A crafted `.docx` or `.odt` file can trigger memory corruption in the parser. The blast radius of any such exploit must be contained to the safe-convert container alone and must not be able to pivot to the database, object storage, or any other internal service.
+**Malicious document exploits.** LibreOffice has a long CVE history. A crafted `.docx` or `.odt` file can trigger memory corruption in the parser. The blast radius of any such exploit must be confined to the ephemeral worker container and must not be able to pivot to the database, object storage, or any other internal service.
 
-**Server-Side Request Forgery (SSRF).** LibreOffice supports macros, remote template fetching (DOCX remote `.dotx` references), linked OLE objects, and DDE fields. Without mitigation, any of these can cause the LibreOffice process to make outbound HTTP or DNS requests from inside your Docker network, potentially reaching your database, internal APIs, or cloud metadata endpoints (e.g. `169.254.169.254`).
+**Server-Side Request Forgery (SSRF).** LibreOffice supports macros, remote template fetching (DOCX `.dotx` references), linked OLE objects, and DDE fields. Without mitigation, any of these can cause the LibreOffice process to make outbound HTTP or DNS requests from inside your Docker network, potentially reaching internal APIs or cloud metadata endpoints (e.g. `169.254.169.254`).
 
-**Data exfiltration via network.** Even without a full exploit, a document with an embedded remote image or linked stylesheet will cause LibreOffice to contact an attacker-controlled server, leaking that the file was processed and potentially leaking environment timing data.
+**Data exfiltration via network.** Even without a full exploit, a document with an embedded remote image or linked stylesheet causes LibreOffice to contact an attacker-controlled server, leaking that the file was processed and potentially leaking environment timing data.
 
-**Resource exhaustion.** A malformed file can cause LibreOffice to hang indefinitely or consume unbounded memory. Hard timeouts and memory limits are enforced at both the process and container level.
+**Resource exhaustion.** A malformed file can cause LibreOffice to hang indefinitely or consume unbounded memory. Hard timeouts and container-level memory limits are enforced on every conversion.
+
+**Docker socket abuse.** The API process needs access to the Docker daemon to spawn worker containers. Direct socket access would let it perform arbitrary Docker operations — pull any image, create privileged containers, mount host paths. A dedicated socket proxy intercepts every Docker API call and enforces a strict allowlist of permitted operations, with image pulls restricted to exactly the pinned worker image digest.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  main_network  (your existing Docker network)                   │
-│                                                                  │
-│   [Supabase]  [Redis]  [Other Services]  [Go API] ◀────────────┼── internet
-│                                                │                 │
-└────────────────────────────────────────────────┼────────────────┘
-                                                 │ (only the Go API
-                                                 │  has a foot here)
-┌────────────────────────────────────────────────┼────────────────┐
-│  lo_isolation  (internal: true)                │                │
-│                                                ▼                │
-│                                          [Go API]               │
-│                                               │                 │
-│                                               ▼                 │
-│                                      [safe-convert]             │
-│                                                                  │
-│   No gateway. Cannot reach main_network or the internet.        │
-└─────────────────────────────────────────────────────────────────┘
+Three services are deployed together:
 
-┌─────────────────────────────────────────────────┐
-│  entry API (this service)                       │
-│                                                 │
-│  - Validate requests                            │
-│  - Enforce auth, size limits, CORS              │
-│  - Connect to Docker socket                     │
-│  - Spawn ephemeral LibreOffice containers       │
-│  - Return PDF to caller                         │
-└─────────────────────────────────────────────────┘
-                      │
-                      │ Docker socket
-                      ▼
-┌─────────────────────────────────────────────────┐
-│  ephemeral LibreOffice container (per request)  │
-│                                                 │
-│  - NetworkMode: none                            │
-│  - Read-only filesystem                         │
-│  - Destroyed immediately after conversion       │
-└─────────────────────────────────────────────────┘
+```
+internet
+    │
+    ▼
+[main_network]  — your existing Docker network
+    │
+    ▼
+[safe-convert API]
+    │  also attached to main_network (Supabase, Redis, etc.)
+    │
+    │  DOCKER_HOST=tcp://socket-proxy:2375
+    │
+[socket_proxy_network]  (internal: true — no external gateway)
+    │
+    ▼
+[socket-proxy]  ── /var/run/docker.sock (read-only)
+    │
+    ▼
+Docker daemon
+    │
+    ▼  (per request)
+[ephemeral worker container]
+    NetworkMode: none — no network interface whatsoever
+    tmpfs /tmp       — in-memory, destroyed with the container
+    Lifecycle: create → copy file in → start → wait → copy PDF out → remove
 ```
 
-The Go API is the sole bridge between the two networks. The safe-convert container has no interface on `main_network`——it cannot address the database, object storage, or any other service by name or IP, because those names and IPs do not exist from its perspective.
+**`cmd/proxy` — socket proxy.** A custom Go reverse proxy that sits between the API and the Docker Unix socket. It enforces a strict allowlist of permitted Docker API method + path combinations, and restricts image pulls to exactly the pinned worker image digest baked in at build time. Everything else returns 403. The proxy lives on `socket_proxy_network`, which has no gateway — it cannot reach the internet or `main_network`.
 
-The Go API:
-- Receives file uploads from the internet on `main_network`
-- Forwards them to safe-convert over `lo_isolation`
-- Retrieves the PDF and returns it to the caller
-- Writes the PDF to S3 / Supabase Storage as needed
+**`cmd/api` — HTTP API.** The entry point for document conversion requests. Validates the `Content-Type` header against known document MIME types, enforces auth and size limits, and dispatches to Docker exclusively through the socket proxy. Streams the document into an ephemeral worker container via `CopyToContainer`, waits for exit, streams the resulting PDF out via `CopyFromContainer`, then destroys the container.
 
-safe-convert:
-- Only ever speaks to the Go API
-- Has no credentials, no database access, no object storage access
-- Converts the file and returns the raw PDF bytes
+**`cmd/worker` — LibreOffice runner.** A minimal Go binary bundled into the worker Docker image. It reads `INPUT_FILE_PATH`, invokes LibreOffice headlessly, and copies the resulting PDF to `/output.pdf` on the container's writable layer so the API can retrieve it after the container exits.
 
 ---
 
 ## Supported Formats
 
-LibreOffice can convert the following input formats to PDF:
+Requests are validated by **`Content-Type` header** — not file extension. The following MIME types are accepted:
 
 ### Word Processing
-| Format | Extensions |
+
+| MIME Type | Extension |
 |---|---|
-| Microsoft Word | `.doc` `.docx` `.dot` `.dotx` |
-| Rich Text Format | `.rtf` |
-| OpenDocument Text | `.odt` `.ott` |
-| Plain Text | `.txt` |
-| HTML | `.html` `.htm` |
+| `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `.docx` |
+| `application/vnd.openxmlformats-officedocument.wordprocessingml.template` | `.dotx` |
+| `application/msword` | `.doc` |
+| `application/vnd.oasis.opendocument.text` | `.odt` |
+| `application/vnd.oasis.opendocument.text-template` | `.ott` |
+| `application/rtf`, `text/rtf` | `.rtf` |
+| `text/plain` | `.txt` |
+| `text/html` | `.html` |
 
 ### Spreadsheets
-| Format | Extensions |
+
+| MIME Type | Extension |
 |---|---|
-| Microsoft Excel | `.xls` `.xlsx` `.xlsm` `.xlt` `.xltx` |
-| OpenDocument Spreadsheet | `.ods` `.ots` |
-| CSV / TSV | `.csv` `.tsv` |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `.xlsx` |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.template` | `.xltx` |
+| `application/vnd.ms-excel` | `.xls` |
+| `application/vnd.oasis.opendocument.spreadsheet` | `.ods` |
+| `application/vnd.oasis.opendocument.spreadsheet-template` | `.ots` |
+| `text/csv` | `.csv` |
 
 ### Presentations
-| Format | Extensions |
-|---|---|
-| Microsoft PowerPoint | `.ppt` `.pptx` `.pot` `.potx` |
-| OpenDocument Presentation | `.odp` `.otp` |
 
-### Drawings
-| Format | Extensions |
+| MIME Type | Extension |
 |---|---|
-| OpenDocument Drawing | `.odg` |
-| Microsoft Visio | `.vsd` `.vsdx` |
-| SVG | `.svg` |
+| `application/vnd.openxmlformats-officedocument.presentationml.presentation` | `.pptx` |
+| `application/vnd.openxmlformats-officedocument.presentationml.template` | `.potx` |
+| `application/vnd.ms-powerpoint` | `.ppt` |
+| `application/vnd.oasis.opendocument.presentation` | `.odp` |
+| `application/vnd.oasis.opendocument.presentation-template` | `.otp` |
 
-> **Note:** Only extensions listed in `SAFE_CONVERT_ALLOWED_EXTENSIONS` will be accepted, regardless of what LibreOffice supports. The default allowlist is conservative. Extend it deliberately.
+### Drawings & Diagrams
+
+| MIME Type | Extension |
+|---|---|
+| `application/vnd.oasis.opendocument.graphics` | `.odg` |
+| `image/svg+xml` | `.svg` |
+| `application/vnd.visio` | `.vsd` |
+| `application/vnd.ms-visio.drawing` | `.vsdx` |
+| `application/vnd.ms-visio.drawing.macroenabled.12` | `.vsdm` |
 
 ### What safe-convert will not process
+
 - **Images** (`.jpg`, `.png`, `.gif`, `.tiff`) — use ImageMagick or Ghostscript
 - **Existing PDFs** — use Ghostscript for PDF-to-PDF operations
 - **Audio, video, archives, executables** — entirely outside scope
@@ -142,45 +139,59 @@ LibreOffice can convert the following input formats to PDF:
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in all required values. Variables marked **Required** have no default and will cause the service to exit at startup if unset.
+Copy `.env.example` to `.env` and fill in all required values. Variables marked **Required** have no default and will cause the service to refuse to start if unset or invalid.
+
+All variables are read by `cmd/api` unless otherwise noted.
 
 ### Authentication
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `SAFE_CONVERT_ACCESS_TOKEN` | **Yes** | — | Bearer token the caller must present in every request. Generate with `openssl rand -hex 32`. |
-
-### File Handling
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `SAFE_CONVERT_MAX_FILE_SIZE_MB` | No | `5` | Maximum accepted upload size in megabytes. Requests exceeding this are rejected with `413` before the file is written to disk. |
-| `SAFE_CONVERT_ALLOWED_EXTENSIONS` | No | (empty — rejects all) | Comma-separated allowlist of permitted input extensions without dots (e.g. `docx,odt,xlsx`). If unset or empty, all uploads are rejected. Fails closed. |
-| `SAFE_CONVERT_INPUT_DIR` | No | `/tmp/safe-convert/in` | Staging directory for uploaded files. Must be on tmpfs. Cleaned after every request. |
-| `SAFE_CONVERT_OUTPUT_DIR` | No | `/tmp/safe-convert/out` | Directory where LibreOffice writes the PDF output. Must be on tmpfs. Cleaned after every request. |
-
-### Conversion Behaviour
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `SAFE_CONVERT_CONVERSION_TIMEOUT_SECS` | No | `30` | Hard deadline on a single LibreOffice invocation. Process is sent `SIGKILL` if it does not exit within this window. |
-| `SAFE_CONVERT_MAX_CONCURRENT_CONVERSIONS` | No | `1` | Semaphore limit on parallel LibreOffice processes. LibreOffice can consume 500 MB+ per conversion; do not raise this without load testing. |
+| `SAFE_CONVERT_ACCESS_TOKEN` | **Yes** | — | Bearer token callers must present on every request. Minimum 32 characters. Generate with `openssl rand -hex 32`. |
 
 ### HTTP Server
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `SAFE_CONVERT_PORT` | No | `8080` | Port the HTTP service listens on inside the container. |
-| `SAFE_CONVERT_READ_TIMEOUT_SECS` | No | `60` | Server read deadline including the uploaded file body. Defends against slow-loris attacks. |
-| `SAFE_CONVERT_WRITE_TIMEOUT_SECS` | No | `90` | Server write deadline for streaming the PDF response. Must exceed `CONVERSION_TIMEOUT_SECS`. |
-| `SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS` | No | `30` | Graceful shutdown window on `SIGTERM` before forced exit. |
+| Variable | Required | Default | Constraints | Description |
+|---|---|---|---|---|
+| `SAFE_CONVERT_PORT` | No | `8080` | 1–65535 | Port the API listens on inside the container. |
+| `SAFE_CONVERT_READ_TIMEOUT_SECS` | No | `15` | 5–300 | Server read deadline. Defends against slow-loris attacks. |
+| `SAFE_CONVERT_WRITE_TIMEOUT_SECS` | No | `15` | 5–600 | Server write deadline for streaming the PDF response. **Must be strictly greater than `READ_TIMEOUT_SECS`.** |
+| `SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS` | No | `30` | 1–120 | Graceful shutdown window on `SIGTERM` before forced exit. |
+
+### File Handling
+
+| Variable | Required | Default | Constraints | Description |
+|---|---|---|---|---|
+| `SAFE_CONVERT_MAX_FILE_SIZE_MB` | No | `5` | 1–500 | Maximum accepted upload size in megabytes. Requests exceeding this are rejected before reaching LibreOffice. |
+
+### Conversion
+
+| Variable | Required | Default | Constraints | Description |
+|---|---|---|---|---|
+| `SAFE_CONVERT_CONVERSION_TIMEOUT_SECS` | No | `30` | 5–300 | Hard deadline on a single LibreOffice invocation. The worker container is force-removed if it does not exit within this window. |
+| `SAFE_CONVERT_CONTAINER_MEMORY_MB` | No | `512` | 128–4096 | Memory limit applied to each ephemeral worker container. |
+| `SAFE_CONVERT_CONTAINER_CPU_COUNT` | No | `1` | 1–8 | CPU count allocated to each ephemeral worker container. |
 
 ### Observability
 
+| Variable | Required | Default | Allowed Values | Description |
+|---|---|---|---|---|
+| `SAFE_CONVERT_LOG_LEVEL` | No | `info` | `debug` `info` `warn` `error` | Minimum log level. Never use `debug` in production — it may log file metadata. |
+| `SAFE_CONVERT_LOG_FORMAT` | No | `json` | `json` `text` | `json` for production log aggregation (Loki, CloudWatch); `text` for local development. |
+
+### Debug
+
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `SAFE_CONVERT_LOG_LEVEL` | No | `info` | Minimum log level. One of: `debug`, `info`, `warn`, `error`. Never use `debug` in production——it may log file metadata. |
-| `SAFE_CONVERT_LOG_FORMAT` | No | `json` | Log format. `json` for production aggregation (Loki, CloudWatch); `text` for local development. |
+| `SAFE_CONVERT_DEBUG` | No | `false` | When `true`, worker containers are preserved after conversion for manual inspection instead of being destroyed. **Never use in production.** |
+
+### Compose-Only
+
+These variables are used by `docker-compose.yml` for port mapping and are not read by the Go services.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SAFE_CONVERT_HOST_PORT` | `8080` | Host-side port bound to the API container. Independent of `SAFE_CONVERT_PORT`. |
 
 ---
 
@@ -188,64 +199,43 @@ Copy `.env.example` to `.env` and fill in all required values. Variables marked 
 
 ### Networks
 
-Two Docker networks are required:
+The compose file declares two networks:
 
 ```yaml
 networks:
   main_network:
-    external: true          # your existing network; defined elsewhere
+    external: true           # your existing network; defined outside this compose file
 
-  lo_isolation:
+  socket_proxy_network:
     driver: bridge
-    internal: true          # no default gateway; zero external routing
+    internal: true           # no default gateway — zero external routing
 ```
 
-The `internal: true` flag is the most important security control in the entire deployment. It instructs Docker to omit the default gateway on the `lo_isolation` bridge, making it physically impossible for containers on it to route packets outside the network. This is a topology guarantee, not a firewall rule.
+`internal: true` on `socket_proxy_network` is the most important network-level security control in the deployment. Docker omits the default gateway on this bridge, making it physically impossible for containers attached to it to route packets to the internet or to `main_network`. This is a topology guarantee, not a firewall rule.
 
-### Service Definitions
+`main_network` must already exist before running `docker compose up`. Create it once:
 
-```yaml
-services:
-  api:
-    image: your-api-image
-    networks:
-      - main_network          # reaches Supabase, Redis, S3, etc.
-      - lo_isolation          # reaches safe-convert only
-    environment:
-      - SAFE_CONVERT_URL=http://safe-convert:8080
-      - SAFE_CONVERT_ACCESS_TOKEN=${SAFE_CONVERT_ACCESS_TOKEN}
-
-  safe-convert:
-    image: your-safe-convert-image
-    networks:
-      - lo_isolation          # sole network attachment — cannot see main_network
-    env_file: .env
-    read_only: true
-    tmpfs:
-      - /tmp/safe-convert/in:size=512m,mode=1777
-      - /tmp/safe-convert/out:size=512m,mode=1777
-      - /home/svcuser/.config:size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    user: "10001:10001"
-    mem_limit: 1g
-    cpus: "1.0"
-    ulimits:
-      nproc: 64
-      nofile:
-        soft: 1024
-        hard: 2048
+```bash
+docker network create main_network
 ```
 
-### Why Two Networks
+### Deploying
 
-The Go API has one network interface on `main_network` and one on `lo_isolation`. This makes it the **sole bridge** between the trusted internal network and the isolated conversion sidecar.
+```bash
+# 1. Create the external network if it does not exist
+docker network create main_network
 
-From the safe-convert container's perspective, Supabase, Redis, and every other service on `main_network` do not exist. Docker's internal DNS does not resolve their names, and there is no IP route to reach them even by address.
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — set SAFE_CONVERT_ACCESS_TOKEN and any overrides
 
-A compromised safe-convert container can only address the Go API over `lo_isolation`——which is why the bearer token provides a meaningful second layer: even if network isolation were somehow misconfigured, an unauthenticated request to any endpoint would be rejected.
+# 3. Start
+docker compose pull
+docker compose up -d
+
+# 4. Confirm liveness
+curl http://localhost:8080/health
+```
 
 ---
 
@@ -263,20 +253,22 @@ Authorization: Bearer <SAFE_CONVERT_ACCESS_TOKEN>
 
 **Request**
 
-```
-Content-Type: multipart/form-data
-```
+Send the document as the raw request body. Set `Content-Type` to the document's MIME type (see [Supported Formats](#supported-formats)).
 
-| Field | Type | Description |
-|---|---|---|
-| `file` | File | The document to convert. Extension must be in `SAFE_CONVERT_ALLOWED_EXTENSIONS`. |
+```bash
+curl -X POST http://localhost:8080/convert \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document" \
+  --data-binary @document.docx \
+  -o output.pdf
+```
 
 **Response — Success**
 
 ```
 HTTP 200 OK
 Content-Type: application/pdf
-Content-Disposition: attachment; filename="<original-stem>.pdf"
+Content-Disposition: attachment; filename="converted.pdf"
 ```
 
 Body is the raw PDF binary.
@@ -285,14 +277,11 @@ Body is the raw PDF binary.
 
 | Status | Condition |
 |---|---|
-| `400 Bad Request` | Missing `file` field, or no filename provided |
-| `401 Unauthorized` | Missing or invalid `Authorization` header |
-| `413 Content Too Large` | File exceeds `SAFE_CONVERT_MAX_FILE_SIZE_MB` |
-| `415 Unsupported Media Type` | Extension not in `SAFE_CONVERT_ALLOWED_EXTENSIONS` |
-| `422 Unprocessable Entity` | LibreOffice exited non-zero (corrupt or unreadable file) |
-| `408 Request Timeout` | LibreOffice exceeded `SAFE_CONVERT_CONVERSION_TIMEOUT_SECS` |
-| `503 Service Unavailable` | Concurrency limit reached; caller should retry with backoff |
-| `500 Internal Server Error` | Unexpected failure; check logs |
+| `400 Bad Request` | `Content-Type` header is missing or malformed |
+| `401 Unauthorized` | `Authorization` header is missing or the token does not match |
+| `413 Content Too Large` | Body exceeds `SAFE_CONVERT_MAX_FILE_SIZE_MB` |
+| `415 Unsupported Media Type` | `Content-Type` is not a recognised document MIME type |
+| `500 Internal Server Error` | Conversion failed, container error, or Docker issue — check logs |
 
 ### `GET /health`
 
@@ -302,32 +291,33 @@ Liveness probe. Returns `200 OK` with body `ok`. No authentication required.
 
 ## Security Hardening Reference
 
-This section documents every hardening measure applied, the threat it addresses, and where it is enforced.
-
 | Measure | Threat Addressed | Enforcement Point |
 |---|---|---|
-| `lo_isolation` network with `internal: true` | SSRF; lateral movement to DB/S3 | Docker network topology |
-| safe-convert attached to `lo_isolation` only | Any network reach to `main_network` services | Docker Compose `networks:` |
-| Static bearer token | Unauthenticated access if network misconfigured | Go HTTP middleware |
-| Non-root user (UID 10001) | Container escape via root-owned processes | `Dockerfile` + Compose `user:` |
-| `cap_drop: ALL` | Privilege escalation via Linux capabilities | Docker Compose |
-| `no-new-privileges: true` | Setuid/setgid binary exploitation | Docker Compose `security_opt:` |
-| Read-only root filesystem | Persistence of exploit artifacts | Compose `read_only: true` |
-| tmpfs for input/output/config | File artifacts cannot survive container restart | Compose `tmpfs:` |
-| Memory and CPU limits | Resource exhaustion / fork bombs | Compose `mem_limit:` / `cpus:` |
-| `ulimits` on nproc / nofile | Fork bombs; file descriptor exhaustion | Compose `ulimits:` |
-| No shell in final image | Post-exploit lateral movement | `Dockerfile` (`rm -f /bin/sh /bin/bash`) |
-| No package manager in final image | Installing attacker tools post-exploit | Multi-stage `Dockerfile` |
-| Setuid/setgid bits removed | Privilege escalation via suid binaries | `Dockerfile` (`find / -perm -4000`) |
-| Per-request ephemeral `UserInstallation` | LibreOffice state pollution between requests | Go conversion handler |
-| LibreOffice macros disabled | VBA/Basic macro execution | `registrymodifications.xcu` |
-| LibreOffice remote content disabled | SSRF via linked images/templates | `registrymodifications.xcu` |
-| LibreOffice DDE disabled | DDE field evaluation as SSRF vector | `registrymodifications.xcu` |
-| LibreOffice Java disabled | JVM attack surface | `registrymodifications.xcu` |
-| Hard conversion timeout (`SIGKILL`) | Indefinite hang on weaponised file | `exec.CommandContext` |
-| Extension allowlist | Processing of unexpected file types | Go request validation |
-| Max file size enforcement | Disk exhaustion; decompression bombs | Go request validation |
-| Input/output cleaned after every request | File artifacts accumulating on tmpfs | Go conversion handler (deferred) |
+| Worker containers with `NetworkMode: none` | SSRF; any network reach from LibreOffice | Docker container config (`cmd/api`) |
+| `socket_proxy_network` with `internal: true` | Internet/`main_network` reach from socket-proxy | Docker network topology |
+| Docker socket proxy with strict allowlist | Arbitrary Docker API calls from the API process | `cmd/proxy` route allowlist |
+| Image pull restricted to pinned worker digest | Pulling arbitrary or malicious images via the proxy | `cmd/proxy` image check |
+| Static bearer token | Unauthenticated access if network misconfigured | `cmd/api` HTTP middleware |
+| `cap_drop: ALL` on all services | Privilege escalation via Linux capabilities | Docker Compose |
+| `no-new-privileges: true` on all services | Setuid/setgid binary exploitation | Docker Compose `security_opt:` |
+| Read-only root filesystem on API and proxy | Persistence of exploit artifacts on the service containers | Compose `read_only: true` |
+| tmpfs `/tmp` in API container (64 MB) | File artifact accumulation on the API | Compose `tmpfs:` |
+| tmpfs `/tmp` in each worker container (256 MB) | File artifact accumulation inside LibreOffice | Docker container config (`cmd/api`) |
+| Memory and CPU limits on worker containers | Resource exhaustion, fork bombs | Docker container config (`cmd/api`) |
+| Non-root user (UID 65534) in API and proxy images | Container escape via root-owned process | `build.api.Dockerfile`, `build.proxy.Dockerfile` |
+| Non-root user (UID 10001) in worker image | Container escape via root-owned process | `build.worker.Dockerfile` |
+| Scratch base image for API and proxy | No shell, no OS tools, no attack surface post-exploit | `build.api.Dockerfile`, `build.proxy.Dockerfile` |
+| Shell binaries removed from worker image | Post-exploit lateral movement | `build.worker.Dockerfile` |
+| Setuid/setgid bits removed from worker image | Privilege escalation via suid binaries | `build.worker.Dockerfile` |
+| Per-invocation LibreOffice `UserInstallation` | State pollution between requests | `cmd/worker` |
+| LibreOffice macros disabled | VBA/Basic macro execution | `registrymodifications.xcu` in worker image |
+| LibreOffice remote content disabled | SSRF via linked images/templates | `registrymodifications.xcu` in worker image |
+| LibreOffice DDE disabled | DDE field evaluation as SSRF vector | `registrymodifications.xcu` in worker image |
+| LibreOffice Java disabled | JVM attack surface | `registrymodifications.xcu` in worker image |
+| Hard conversion timeout with force-remove | Indefinite hang on a weaponised file | `cmd/api` Docker client |
+| Content-Type MIME type allowlist | Unsupported or unexpected file types reaching LibreOffice | `cmd/api` request validation |
+| `MaxBytesReader` size enforcement | Disk exhaustion; decompression bombs | `cmd/api` HTTP middleware |
+| Worker containers destroyed after every conversion | File artifact accumulation; container state re-use | `cmd/api` Docker client (deferred) |
 
 ---
 
@@ -343,36 +333,53 @@ This section documents every hardening measure applied, the threat it addresses,
 ### Local Setup
 
 ```bash
-# 1. Clone the repository
+# 1. Clone
 git clone https://github.com/projdocs/safe-convert
 cd safe-convert
 
 # 2. Generate a local access token
 openssl rand -hex 32
 
-# 3. Configure environment
+# 3. Configure
 cp .env.example .env
-# Edit .env — paste the token into SAFE_CONVERT_ACCESS_TOKEN
+# Edit .env: paste the token into SAFE_CONVERT_ACCESS_TOKEN
+# Set SAFE_CONVERT_WRITE_TIMEOUT_SECS to a value greater than SAFE_CONVERT_READ_TIMEOUT_SECS
 
-# 4. Build and run
+# 4. Create the external network
+docker network create main_network
+
+# 5. Build and run
 docker compose up --build
 
-# 5. Test a conversion
-curl -s \
-  -H "Authorization: Bearer $(grep ACCESS_TOKEN .env | cut -d= -f2)" \
-  -F "file=@/path/to/document.docx" \
-  http://localhost:8080/convert \
+# 6. Test a conversion
+curl -X POST http://localhost:8080/convert \
+  -H "Authorization: Bearer $(grep SAFE_CONVERT_ACCESS_TOKEN .env | cut -d= -f2)" \
+  -H "Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document" \
+  --data-binary @sample.docx \
   -o output.pdf
 ```
 
-### Running Without Docker (for Go development)
+### Building Individual Images
 
-LibreOffice must be installed locally.
+The worker image digest is baked into the API and proxy binaries at build time via `-ldflags`. Build the worker image first so you have a reference to pass to the other builds:
 
 ```bash
-go run ./cmd/server
+# Build the worker image
+docker build -f build.worker.Dockerfile -t ghcr.io/projdocs/safe-convert-worker:dev .
+
+# Build the API with the worker image reference baked in
+docker build -f build.api.Dockerfile \
+  --build-arg WORKER_IMAGE=ghcr.io/projdocs/safe-convert-worker:dev \
+  -t ghcr.io/projdocs/safe-convert-api:dev .
+
+# Build the proxy with the same worker image reference
+docker build -f build.proxy.Dockerfile \
+  --build-arg WORKER_IMAGE=ghcr.io/projdocs/safe-convert-worker:dev \
+  -t ghcr.io/projdocs/safe-convert-proxy:dev .
 ```
+
+For production, use the full digest reference (e.g. `ghcr.io/projdocs/safe-convert-worker@sha256:…`) so the pinned image cannot be silently replaced.
 
 ### Logging
 
-In development, set `SAFE_CONVERT_LOG_FORMAT=text` and `SAFE_CONVERT_LOG_LEVEL=debug` in `.env` for human-readable output. Do not use these settings in production.
+Set `SAFE_CONVERT_LOG_FORMAT=text` and `SAFE_CONVERT_LOG_LEVEL=debug` in `.env` for human-readable output during development. Do not use these settings in production.
