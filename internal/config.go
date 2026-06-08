@@ -48,13 +48,13 @@ func LoadConfig() (*Config, error) {
 
 	v.SetDefault("debug", false)
 	v.SetDefault("port", 8080)
-	v.SetDefault("read_timeout_secs", 60)
-	v.SetDefault("write_timeout_secs", 90)
+	v.SetDefault("read_timeout_secs", 15)
+	v.SetDefault("write_timeout_secs", 15)
 	v.SetDefault("shutdown_timeout_secs", 30)
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")
 	v.SetDefault("max_file_size_mb", 5)
-	v.SetDefault("conversion_timeout_secs", 15)
+	v.SetDefault("conversion_timeout_secs", 30)
 	v.SetDefault("container_memory_mb", 512)
 	v.SetDefault("container_cpu_count", 1)
 

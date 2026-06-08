@@ -1,0 +1,92 @@
+services:
+
+  # ── Socket proxy ──────────────────────────────────────────────────
+  # Custom Go reverse proxy. Enforces:
+  #   - A strict allowlist of Docker API method + path combinations.
+  #   - Image pulls restricted to exactly the pinned worker image digest.
+  # Everything else returns 403.
+  socket-proxy:
+    image: ghcr.io/projdocs/safe-convert-proxy:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOCKER_SOCKET: /var/run/docker.sock
+      PROXY_LISTEN: ":2375"
+    networks:
+      - socket_proxy_network
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+
+  # ── API ───────────────────────────────────────────────────────────
+  safe-convert:
+    image: ghcr.io/projdocs/safe-convert-api:latest
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      # Required — no default. Generate with: openssl rand -hex 32
+      SAFE_CONVERT_ACCESS_TOKEN: ${SAFE_CONVERT_ACCESS_TOKEN}
+
+      # HTTP server
+      SAFE_CONVERT_PORT: ${SAFE_CONVERT_PORT:-8080}
+      SAFE_CONVERT_READ_TIMEOUT_SECS: ${SAFE_CONVERT_READ_TIMEOUT_SECS:-15}
+      SAFE_CONVERT_WRITE_TIMEOUT_SECS: ${SAFE_CONVERT_WRITE_TIMEOUT_SECS:-15}
+      SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS: ${SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS:-30}
+
+      # File handling
+      SAFE_CONVERT_MAX_FILE_SIZE_MB: ${SAFE_CONVERT_MAX_FILE_SIZE_MB:-5}
+
+      # Conversion
+      SAFE_CONVERT_CONVERSION_TIMEOUT_SECS: ${SAFE_CONVERT_CONVERSION_TIMEOUT_SECS:-30}
+      SAFE_CONVERT_CONTAINER_MEMORY_MB: ${SAFE_CONVERT_CONTAINER_MEMORY_MB:-512}
+      SAFE_CONVERT_CONTAINER_CPU_COUNT: ${SAFE_CONVERT_CONTAINER_CPU_COUNT:-1}
+
+      # Observability
+      SAFE_CONVERT_LOG_LEVEL: ${SAFE_CONVERT_LOG_LEVEL:-info}
+      SAFE_CONVERT_LOG_FORMAT: ${SAFE_CONVERT_LOG_FORMAT:-json}
+
+      # Debug — keeps ephemeral containers alive after conversion for inspection
+      SAFE_CONVERT_DEBUG: ${SAFE_CONVERT_DEBUG:-false}
+
+      # Docker SDK talks to the socket proxy, never the raw socket directly.
+      DOCKER_HOST: tcp://socket-proxy:2375
+
+    networks:
+      - main_network
+      - socket_proxy_network
+
+    ports:
+      - "${SAFE_CONVERT_HOST_PORT:-8080}:${SAFE_CONVERT_PORT:-8080}"
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+networks:
+  # Your existing network — the API uses this to reach other services.
+  main_network:
+    external: true
+
+  # Shared only by the API and the socket proxy.
+  # internal: true means no external routing — the proxy cannot reach
+  # the internet or main_network.
+  socket_proxy_network:
+    driver: bridge
+    internal: true

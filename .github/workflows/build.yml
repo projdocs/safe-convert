@@ -65,7 +65,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: worker.Dockerfile
+          file: build.worker.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -133,7 +133,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: api.Dockerfile
+          file: build.api.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -202,8 +202,8 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ./proxy
-          file: ./proxy/Dockerfile
+          context: .
+          file: build.proxy.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
