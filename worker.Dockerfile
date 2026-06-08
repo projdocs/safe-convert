@@ -55,6 +55,13 @@ RUN groupadd --gid 10001 svcgroup && \
       --comment "LibreOffice service account" \
       svcuser
 
+# Pre-create /output.pdf owned by svcuser with mode 600.
+# svcuser can write to this exact file but cannot create any other
+# files on the root filesystem — principle of least privilege.
+RUN touch /output.pdf && \
+    chown svcuser:svcgroup /output.pdf && \
+    chmod 600 /output.pdf
+
 # Remove setuid/setgid bits from every binary in the image.
 RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
 
