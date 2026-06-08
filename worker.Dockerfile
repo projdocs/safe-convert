@@ -60,7 +60,6 @@ RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/n
 
 RUN rm -f \
     /bin/bash \
-    /bin/dash \
     /usr/bin/bash \
     /usr/bin/perl \
     /usr/bin/python3 \
