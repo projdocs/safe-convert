@@ -1,8 +1,6 @@
 # ── Stage 1: installer ────────────────────────────────────────────
 FROM debian:12-slim AS installer
 
-ARG LIBREOFFICE_VERSION=24.8
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         libreoffice-writer \
@@ -17,12 +15,17 @@ RUN apt-get update && \
         libxinerama1 \
         libxrandr2 \
         libxrender1 \
+        fontconfig \
     && apt-get clean \
     && rm -rf \
         /var/lib/apt/lists/* \
         /var/cache/apt/archives/* \
         /tmp/* \
         /var/tmp/*
+
+# Build the font cache inside the installer stage where fc-cache is available.
+# The resulting cache directory is copied into the runtime stage below.
+RUN fc-cache -fv
 
 # ── Stage 2: hardened runtime ─────────────────────────────────────
 FROM debian:12-slim AS runtime
@@ -32,15 +35,15 @@ COPY --from=installer /usr/bin/libreoffice        /usr/bin/libreoffice
 COPY --from=installer /usr/share/fonts            /usr/share/fonts
 COPY --from=installer /usr/share/libreoffice      /usr/share/libreoffice
 COPY --from=installer /etc/fonts                  /etc/fonts
-# shared libraries LibreOffice links against
 COPY --from=installer /usr/lib/x86_64-linux-gnu   /usr/lib/x86_64-linux-gnu
 COPY --from=installer /lib/x86_64-linux-gnu       /lib/x86_64-linux-gnu
 
-# rebuild font cache inside the final image
-RUN fc-cache -fv
+# Copy the pre-built font cache — no tooling required in the runtime stage.
+COPY --from=installer /var/cache/fontconfig       /var/cache/fontconfig
+COPY --from=installer /root/.cache/fontconfig     /root/.cache/fontconfig
 
 RUN groupadd --gid 10001 svcgroup && \
-    useradd  \
+    useradd \
       --uid 10001 \
       --gid 10001 \
       --no-create-home \
@@ -48,10 +51,10 @@ RUN groupadd --gid 10001 svcgroup && \
       --comment "LibreOffice service account" \
       svcuser
 
-# remove setuid/setgid bits from every binary in the image.
+# Remove setuid/setgid bits from every binary in the image.
 RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
 
-# remove any shells that might have been pulled in transitively.
+# Remove any shells pulled in transitively.
 RUN rm -f \
     /bin/sh \
     /bin/bash \
@@ -63,9 +66,3 @@ RUN rm -f \
     2>/dev/null || true
 
 USER svcuser
-
-# No EXPOSE — this image does not define a port.
-# The HTTP service layer (Go binary) will be added on top of this
-# base in the next stage when we build safe-convert.
-
-# No CMD — this is a base image, not a runnable image yet.
