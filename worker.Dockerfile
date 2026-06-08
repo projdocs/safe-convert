@@ -1,4 +1,23 @@
-# ── Stage 1: installer ────────────────────────────────────────────
+# ── Stage 1: build the worker binary ──────────────────────────────
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Build a fully static binary — no libc, no dynamic linker required.
+# The hardened runtime stage has neither.
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o /worker \
+      ./cmd/worker
+
+# ── Stage 2: installer ────────────────────────────────────────────
 FROM debian:12-slim AS installer
 
 RUN apt-get update && \
@@ -25,7 +44,7 @@ RUN apt-get update && \
 
 RUN fc-cache -fv
 
-# ── Stage 2: hardened runtime ─────────────────────────────────────
+# ── Stage 3: hardened runtime ─────────────────────────────────────
 FROM debian:12-slim AS runtime
 
 COPY --from=installer /usr/lib/libreoffice   /usr/lib/libreoffice
@@ -34,6 +53,9 @@ COPY --from=installer /usr/share/libreoffice /usr/share/libreoffice
 COPY --from=installer /usr/share/fonts       /usr/share/fonts
 COPY --from=installer /etc/fonts             /etc/fonts
 COPY --from=installer /var/cache/fontconfig  /var/cache/fontconfig
+
+# Copy the static worker binary — no runtime dependencies.
+COPY --from=builder /worker /worker
 
 RUN groupadd --gid 10001 svcgroup && \
     useradd \
@@ -47,7 +69,7 @@ RUN groupadd --gid 10001 svcgroup && \
 # Remove setuid/setgid bits from every binary in the image.
 RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
 
-# Remove any shells pulled in transitively.
+# Remove shells pulled in transitively.
 RUN rm -f \
     /bin/sh \
     /bin/bash \
@@ -59,3 +81,5 @@ RUN rm -f \
     2>/dev/null || true
 
 USER svcuser
+
+ENTRYPOINT ["/worker"]
