@@ -23,19 +23,17 @@ RUN apt-get update && \
         /tmp/* \
         /var/tmp/*
 
-# Build the font cache inside the installer stage where fc-cache is available.
 RUN fc-cache -fv
 
 # ── Stage 2: hardened runtime ─────────────────────────────────────
 FROM debian:12-slim AS runtime
 
-COPY --from=installer /usr/lib/libreoffice        /usr/lib/libreoffice
-COPY --from=installer /usr/bin/libreoffice        /usr/bin/libreoffice
-COPY --from=installer /usr/share/fonts            /usr/share/fonts
-COPY --from=installer /usr/share/libreoffice      /usr/share/libreoffice
-COPY --from=installer /etc/fonts                  /etc/fonts
-COPY --from=installer /usr/lib/x86_64-linux-gnu   /usr/lib/x86_64-linux-gnu
-COPY --from=installer /var/cache/fontconfig       /var/cache/fontconfig
+COPY --from=installer /usr/lib/libreoffice   /usr/lib/libreoffice
+COPY --from=installer /usr/bin/libreoffice   /usr/bin/libreoffice
+COPY --from=installer /usr/share/libreoffice /usr/share/libreoffice
+COPY --from=installer /usr/share/fonts       /usr/share/fonts
+COPY --from=installer /etc/fonts             /etc/fonts
+COPY --from=installer /var/cache/fontconfig  /var/cache/fontconfig
 
 RUN groupadd --gid 10001 svcgroup && \
     useradd \
