@@ -8,8 +8,6 @@ RUN go mod download
 
 COPY . .
 
-# Build a fully static binary — no libc, no dynamic linker required.
-# The hardened runtime stage has neither.
 RUN CGO_ENABLED=0 GOOS=linux \
     go build \
       -trimpath \
@@ -17,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
       -o /worker \
       ./cmd/worker
 
-# ── Stage 2: installer ────────────────────────────────────────────
+# ── Stage 2: installer ──────────────────────────────────────────────
 FROM debian:12-slim AS installer
 
 RUN apt-get update && \
@@ -35,6 +33,7 @@ RUN apt-get update && \
         libxrandr2 \
         libxrender1 \
         fontconfig \
+    && fc-cache -fv \
     && apt-get clean \
     && rm -rf \
         /var/lib/apt/lists/* \
@@ -42,18 +41,9 @@ RUN apt-get update && \
         /tmp/* \
         /var/tmp/*
 
-RUN fc-cache -fv
-
 # ── Stage 3: hardened runtime ─────────────────────────────────────
-FROM debian:12-slim AS runtime
+FROM installer AS runner
 
-COPY --from=installer /usr/lib/libreoffice   /usr/lib/libreoffice
-COPY --from=installer /usr/share/libreoffice /usr/share/libreoffice
-COPY --from=installer /usr/share/fonts       /usr/share/fonts
-COPY --from=installer /etc/fonts             /etc/fonts
-COPY --from=installer /var/cache/fontconfig  /var/cache/fontconfig
-
-# Copy the static worker binary — no runtime dependencies.
 COPY --from=builder /worker /worker
 
 RUN groupadd --gid 10001 svcgroup && \
@@ -68,12 +58,9 @@ RUN groupadd --gid 10001 svcgroup && \
 # Remove setuid/setgid bits from every binary in the image.
 RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
 
-# Remove shells pulled in transitively.
 RUN rm -f \
-    /bin/sh \
     /bin/bash \
     /bin/dash \
-    /usr/bin/sh \
     /usr/bin/bash \
     /usr/bin/perl \
     /usr/bin/python3 \
