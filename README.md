@@ -61,6 +61,26 @@ Processing arbitrary user-uploaded documents is one of the more dangerous operat
 │                                                                  │
 │   No gateway. Cannot reach main_network or the internet.        │
 └─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────┐
+│  entry API (this service)                       │
+│                                                 │
+│  - Validate requests                            │
+│  - Enforce auth, size limits, CORS              │
+│  - Connect to Docker socket                     │
+│  - Spawn ephemeral LibreOffice containers       │
+│  - Return PDF to caller                         │
+└─────────────────────────────────────────────────┘
+                      │
+                      │ Docker socket
+                      ▼
+┌─────────────────────────────────────────────────┐
+│  ephemeral LibreOffice container (per request)  │
+│                                                 │
+│  - NetworkMode: none                            │
+│  - Read-only filesystem                         │
+│  - Destroyed immediately after conversion       │
+└─────────────────────────────────────────────────┘
 ```
 
 The Go API is the sole bridge between the two networks. The safe-convert container has no interface on `main_network`——it cannot address the database, object storage, or any other service by name or IP, because those names and IPs do not exist from its perspective.

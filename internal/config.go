@@ -10,6 +10,10 @@ import (
 // Config holds the validated runtime configuration.
 // Fields are added here only as each feature is built.
 type Config struct {
+
+	// Authentication.
+	AccessToken string
+
 	// Port the HTTP server listens on.
 	Port uint16
 
@@ -21,6 +25,14 @@ type Config struct {
 	// Logging.
 	LogLevel  string // debug | info | warn | error
 	LogFormat string // json | text
+
+	// File handling.
+	MaxFileSizeBytes int64
+
+	// Docker.
+	ConversionTimeoutSecs int
+	ContainerMemoryBytes  int64
+	ContainerCPUQuota     int64 // microseconds per 100ms period (100000 = 1 CPU)
 }
 
 // LoadConfig reads exclusively from environment variables, applies defaults where
@@ -39,8 +51,23 @@ func LoadConfig() (*Config, error) {
 	v.SetDefault("shutdown_timeout_secs", 30)
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")
+	v.SetDefault("max_file_size_mb", 5)
+	v.SetDefault("conversion_timeout_secs", 15)
+	v.SetDefault("container_memory_mb", 512)
+	v.SetDefault("container_cpu_count", 1)
 
 	var errs []string
+
+	// ACCESS_TOKEN is required — no default. The service must not start without
+	// it. A minimum length of 32 characters is enforced; anything shorter
+	// provides insufficient entropy for a bearer token.
+	accessToken := strings.TrimSpace(v.GetString("access_token"))
+	if accessToken == "" {
+		errs = append(errs, "SAFE_CONVERT_ACCESS_TOKEN is required (generate with: openssl rand -hex 32)")
+	} else if len(accessToken) < 32 {
+		errs = append(errs, "SAFE_CONVERT_ACCESS_TOKEN must be at least 32 characters")
+	}
+
 	port := v.GetInt("port")
 	if port < 1 || port > 65535 {
 		errs = append(errs, fmt.Sprintf(
@@ -91,17 +118,50 @@ func LoadConfig() (*Config, error) {
 		))
 	}
 
+	maxFileSizeMB := v.GetInt64("max_file_size_mb")
+	if maxFileSizeMB < 1 || maxFileSizeMB > 500 {
+		errs = append(errs, fmt.Sprintf(
+			"SAFE_CONVERT_MAX_FILE_SIZE_MB must be between 1 and 500, got %d", maxFileSizeMB,
+		))
+	}
+
+	conversionTimeout := v.GetInt("conversion_timeout_secs")
+	if conversionTimeout < 5 || conversionTimeout > 300 {
+		errs = append(errs, fmt.Sprintf(
+			"SAFE_CONVERT_CONVERSION_TIMEOUT_SECS must be between 5 and 300, got %d", conversionTimeout,
+		))
+	}
+
+	containerMemoryMB := v.GetInt64("container_memory_mb")
+	if containerMemoryMB < 128 || containerMemoryMB > 4096 {
+		errs = append(errs, fmt.Sprintf(
+			"SAFE_CONVERT_CONTAINER_MEMORY_MB must be between 128 and 4096, got %d", containerMemoryMB,
+		))
+	}
+
+	containerCPUCount := v.GetInt64("container_cpu_count")
+	if containerCPUCount < 1 || containerCPUCount > 8 {
+		errs = append(errs, fmt.Sprintf(
+			"SAFE_CONVERT_CONTAINER_CPU_COUNT must be between 1 and 8, got %d", containerCPUCount,
+		))
+	}
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("configuration errors:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 
 	return &Config{
-		Port:                uint16(port),
-		ReadTimeoutSecs:     readTimeout,
-		WriteTimeoutSecs:    writeTimeout,
-		ShutdownTimeoutSecs: shutdownTimeout,
-		LogLevel:            logLevel,
-		LogFormat:           logFormat,
+		AccessToken:           accessToken,
+		Port:                  uint16(port),
+		ReadTimeoutSecs:       readTimeout,
+		WriteTimeoutSecs:      writeTimeout,
+		ShutdownTimeoutSecs:   shutdownTimeout,
+		LogLevel:              logLevel,
+		LogFormat:             logFormat,
+		MaxFileSizeBytes:      maxFileSizeMB * 1024 * 1024,
+		ConversionTimeoutSecs: conversionTimeout,
+		ContainerMemoryBytes:  containerMemoryMB * 1024 * 1024,
+		ContainerCPUQuota:     containerCPUCount * 100000,
 	}, nil
 }
 
