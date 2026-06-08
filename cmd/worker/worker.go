@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,8 +26,6 @@ func run() error {
 	if inputPath == "" {
 		return fmt.Errorf("INPUT_FILE_PATH is not set")
 	}
-
-	outputPath := filepath.Join(outputDir, "output.pdf")
 
 	// -------------------------------------------------------------------------
 	// 2. Verify the input file exists and is readable.
@@ -86,10 +85,36 @@ func run() error {
 		return fmt.Errorf("libreoffice did not produce output at %s: %w", libreofficeOutput, err)
 	}
 
-	if err := os.Rename(libreofficeOutput, outputPath); err != nil {
-		return fmt.Errorf("rename output: %w", err)
+	// -------------------------------------------------------------------------
+	// 5. Copy the PDF from tmpfs to the container's writable root layer.
+	//
+	// The tmpfs at /tmp is destroyed when the container stops. CopyFromContainer
+	// runs on a stopped container, so the output must be on the writable layer
+	// before we exit. We copy (not rename) so that if the copy fails the
+	// original on tmpfs is still intact for debugging.
+	// -------------------------------------------------------------------------
+	persistedOutput := "/output.pdf"
+
+	in, err := os.Open(libreofficeOutput)
+	if err != nil {
+		return fmt.Errorf("open output for copy: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.Create(persistedOutput)
+	if err != nil {
+		return fmt.Errorf("create persisted output: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy output to writable layer: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "worker: conversion complete → %s\n", outputPath)
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close persisted output: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "worker: conversion complete → %s\n", persistedOutput)
 	return nil
 }

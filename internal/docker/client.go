@@ -150,7 +150,7 @@ func (d *Client) Convert(
 			CPUQuota:  d.cfg.ContainerCPUQuota,
 			CPUPeriod: 100000,
 		},
-		AutoRemove: !d.cfg.Debug,
+		AutoRemove: false,
 	}
 
 	created, err := d.cli.ContainerCreate(convCtx, containerCfg, hostCfg, nil, nil, "")
@@ -295,7 +295,7 @@ func (d *Client) Convert(
 	// CopyFromContainer returns a tar stream; we unwrap the first entry and
 	// pipe it directly to the response writer without buffering.
 	// -------------------------------------------------------------------------
-	rc, _, err := d.cli.CopyFromContainer(convCtx, containerID, "/tmp/output.pdf")
+	rc, _, err := d.cli.CopyFromContainer(convCtx, containerID, "/output.pdf")
 	if err != nil {
 		return fmt.Errorf("copy from container: %w", err)
 	}
