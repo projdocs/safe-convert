@@ -24,7 +24,6 @@ RUN apt-get update && \
         /var/tmp/*
 
 # Build the font cache inside the installer stage where fc-cache is available.
-# The resulting cache directory is copied into the runtime stage below.
 RUN fc-cache -fv
 
 # ── Stage 2: hardened runtime ─────────────────────────────────────
@@ -36,9 +35,6 @@ COPY --from=installer /usr/share/fonts            /usr/share/fonts
 COPY --from=installer /usr/share/libreoffice      /usr/share/libreoffice
 COPY --from=installer /etc/fonts                  /etc/fonts
 COPY --from=installer /usr/lib/x86_64-linux-gnu   /usr/lib/x86_64-linux-gnu
-COPY --from=installer /lib/x86_64-linux-gnu       /lib/x86_64-linux-gnu
-
-# Copy the pre-built font cache — no tooling required in the runtime stage.
 COPY --from=installer /var/cache/fontconfig       /var/cache/fontconfig
 
 RUN groupadd --gid 10001 svcgroup && \
