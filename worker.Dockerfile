@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
       -trimpath \
       -ldflags="-s -w" \
       -o /worker \
-      ./worker.go
+      ./cmd/worker
 
 # ── Stage 2: installer ────────────────────────────────────────────
 FROM debian:12-slim AS installer

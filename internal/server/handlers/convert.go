@@ -54,25 +54,26 @@ func (h *Convert) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ext, ok := internal.IsKnownMIMEType(strings.ToLower(mediaType)); !ok {
+	mimeType := strings.ToLower(mediaType)
+	if _, ok := internal.IsKnownMIMEType(mimeType); !ok {
 		log.Warn("unrecognised Content-Type", zap.String("media_type", mediaType))
 		http.Error(w, "Content-Type is not a supported document type", http.StatusUnsupportedMediaType)
 		return
-	} else {
-		// -------------------------------------------------------------------------
-		// Pipe r.Body to an ephemeral LibreOffice container.
-		// -------------------------------------------------------------------------
-		log.Info("dispatching conversion", zap.String("media_type", mediaType))
-		if err := h.docker.Convert(
-			r.Context(),
-			r.Body,
-			ext,
-			w,
-			r,
-			log,
-		); err != nil {
-			log.Error("conversion failed", zap.Error(err))
-			http.Error(w, "conversion failed", http.StatusInternalServerError)
-		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Pipe r.Body to an ephemeral LibreOffice container.
+	// -------------------------------------------------------------------------
+	log.Info("dispatching conversion", zap.String("media_type", mediaType))
+	if err := h.docker.Convert(
+		r.Context(),
+		r.Body,
+		mimeType,
+		w,
+		r,
+		log,
+	); err != nil {
+		log.Error("conversion failed", zap.Error(err))
+		http.Error(w, "conversion failed", http.StatusInternalServerError)
 	}
 }

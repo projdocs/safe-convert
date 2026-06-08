@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/projdocs/safe-convert/internal"
 	"go.uber.org/zap"
 )
@@ -92,7 +95,7 @@ func NewClient(cfg *internal.Config, log *zap.Logger) (*Client, error) {
 func (d *Client) Convert(
 	ctx context.Context,
 	body io.Reader,
-	ext string,
+	mimeType string,
 	w http.ResponseWriter,
 	r *http.Request,
 	log *zap.Logger,
@@ -102,6 +105,13 @@ func (d *Client) Convert(
 		time.Duration(d.cfg.ConversionTimeoutSecs)*time.Second,
 	)
 	defer cancel()
+
+	ext, ok := internal.IsKnownMIMEType(mimeType)
+	if !ok {
+		return fmt.Errorf("mime type not supported")
+	}
+	inputFileName := fmt.Sprintf("input%s", ext)
+	inputFilePath := fmt.Sprintf("/%s", inputFileName)
 
 	// -------------------------------------------------------------------------
 	// Create the container — not yet started.
@@ -122,6 +132,9 @@ func (d *Client) Convert(
 	// -------------------------------------------------------------------------
 	containerCfg := &container.Config{
 		Image: WorkerImage,
+		Env: []string{
+			"INPUT_FILE_PATH=" + inputFilePath,
+		},
 	}
 
 	hostCfg := &container.HostConfig{
@@ -137,7 +150,7 @@ func (d *Client) Convert(
 			CPUQuota:  d.cfg.ContainerCPUQuota,
 			CPUPeriod: 100000,
 		},
-		AutoRemove: true,
+		AutoRemove: !d.cfg.Debug,
 	}
 
 	created, err := d.cli.ContainerCreate(convCtx, containerCfg, hostCfg, nil, nil, "")
@@ -149,6 +162,18 @@ func (d *Client) Convert(
 	log.Info("container created", zap.String("container_id", containerID[:12]))
 
 	defer func() {
+
+		// capture logs
+		d.captureContainerLogs(containerID, log)
+
+		// don't remove on debug
+		if d.cfg.Debug {
+			log.Info("debug mode: container preserved for inspection",
+				zap.String("container_id", containerID[:12]),
+			)
+			return
+		}
+
 		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer rmCancel()
 		if err := d.cli.ContainerRemove(rmCtx, containerID, container.RemoveOptions{
@@ -181,7 +206,7 @@ func (d *Client) Convert(
 		tw := tar.NewWriter(pw)
 		err := tw.WriteHeader(&tar.Header{
 			Format: tar.FormatPAX,
-			Name:   "input" + ext,
+			Name:   inputFileName,
 			Mode:   0444,
 			// Size 0 with PAX format: the daemon accepts a streaming tar entry
 			// without a declared size. If Content-Length is present and correct,
@@ -212,7 +237,7 @@ func (d *Client) Convert(
 	err = d.cli.CopyToContainer(
 		convCtx,
 		containerID,
-		"/tmp",
+		filepath.Dir(inputFilePath),
 		pr,
 		container.CopyToContainerOptions{
 			AllowOverwriteDirWithFile: false,
@@ -230,7 +255,7 @@ func (d *Client) Convert(
 
 	log.Info("file copied to container",
 		zap.String("container_id", containerID[:12]),
-		zap.String("input", "/tmp/input"+ext),
+		zap.String("input", inputFilePath),
 	)
 
 	// -------------------------------------------------------------------------
@@ -301,4 +326,46 @@ func (d *Client) PruneStoppedContainers(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("container prune: %w", err)
 	}
 	return len(report.ContainersDeleted), nil
+}
+
+func (d *Client) captureContainerLogs(containerID string, log *zap.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rc, err := d.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: false,
+	})
+	if err != nil {
+		log.Warn("could not retrieve container logs",
+			zap.String("container_id", containerID[:12]),
+			zap.Error(err),
+		)
+		return
+	}
+	defer rc.Close()
+
+	var stdout, stderr strings.Builder
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, rc); err != nil {
+		log.Warn("error demultiplexing container logs",
+			zap.String("container_id", containerID[:12]),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		log.Info("container stdout",
+			zap.String("container_id", containerID[:12]),
+			zap.String("output", out),
+		)
+	}
+
+	if out := strings.TrimSpace(stderr.String()); out != "" {
+		log.Info("container stderr",
+			zap.String("container_id", containerID[:12]),
+			zap.String("output", out),
+		)
+	}
 }

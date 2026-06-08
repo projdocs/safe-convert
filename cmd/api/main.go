@@ -37,6 +37,7 @@ func main() {
 		zap.Int("port", int(cfg.Port)),
 		zap.String("log_level", cfg.LogLevel),
 		zap.String("log_format", cfg.LogFormat),
+		zap.Bool("debug", cfg.Debug),
 	)
 
 	var protocols http.Protocols

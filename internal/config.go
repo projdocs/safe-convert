@@ -10,6 +10,7 @@ import (
 // Config holds the validated runtime configuration.
 // Fields are added here only as each feature is built.
 type Config struct {
+	Debug bool
 
 	// Authentication.
 	AccessToken string
@@ -45,6 +46,7 @@ func LoadConfig() (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
+	v.SetDefault("debug", false)
 	v.SetDefault("port", 8080)
 	v.SetDefault("read_timeout_secs", 60)
 	v.SetDefault("write_timeout_secs", 90)
@@ -151,6 +153,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &Config{
+		Debug:                 v.GetBool("debug"),
 		AccessToken:           accessToken,
 		Port:                  uint16(port),
 		ReadTimeoutSecs:       readTimeout,

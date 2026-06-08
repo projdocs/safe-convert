@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/projdocs/safe-convert/internal"
 )
 
 const (
@@ -24,20 +22,11 @@ func main() {
 }
 
 func run() error {
-	// -------------------------------------------------------------------------
-	// 1. Resolve the input file path from INPUT_MIME_TYPE.
-	// -------------------------------------------------------------------------
-	mediaType := strings.ToLower(strings.TrimSpace(os.Getenv("INPUT_MIME_TYPE")))
-	if mediaType == "" {
-		return fmt.Errorf("INPUT_MIME_TYPE is not set")
-	}
 
-	ext, ok := internal.IsKnownMIMEType(mediaType)
-	if !ok {
-		return fmt.Errorf("unrecognised INPUT_MIME_TYPE: %q", mediaType)
-	}
-
-	inputPath := filepath.Join(inputDir, "input"+ext)
+	// -------------------------------------------------------------------------
+	// 1. Resolve the input file path from INPUT_FILE_PATH.
+	// -------------------------------------------------------------------------
+	inputPath := strings.TrimSpace(os.Getenv("INPUT_FILE_PATH"))
 	outputPath := filepath.Join(outputDir, "output.pdf")
 
 	// -------------------------------------------------------------------------
