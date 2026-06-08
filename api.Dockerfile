@@ -1,6 +1,6 @@
 FROM golang:1.26-alpine AS build
 
-ARG WORKER_IMAGE=ghcr.io/projdocs/safe-convert-worker:latest
+ARG WORKER_IMAGE
 
 WORKDIR /build
 
