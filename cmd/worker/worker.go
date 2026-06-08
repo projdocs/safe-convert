@@ -6,13 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-const (
-	inputDir  = "/tmp"
-	outputDir = "/tmp"
-)
+const outputDir = "/tmp"
 
 func main() {
 	if err := run(); err != nil {
@@ -22,11 +18,14 @@ func main() {
 }
 
 func run() error {
-
 	// -------------------------------------------------------------------------
 	// 1. Resolve the input file path from INPUT_FILE_PATH.
 	// -------------------------------------------------------------------------
 	inputPath := strings.TrimSpace(os.Getenv("INPUT_FILE_PATH"))
+	if inputPath == "" {
+		return fmt.Errorf("INPUT_FILE_PATH is not set")
+	}
+
 	outputPath := filepath.Join(outputDir, "output.pdf")
 
 	// -------------------------------------------------------------------------
@@ -40,20 +39,18 @@ func run() error {
 	// 3. Invoke LibreOffice.
 	//
 	// Flags used:
-	//   --headless          — no GUI; required for server-side use.
-	//   --norestore         — do not attempt to restore a previous session.
+	//   --headless           — no GUI; required for server-side use.
+	//   --norestore          — do not attempt to restore a previous session.
 	//   --nofirststartwizard — skip the first-run wizard.
-	//   --nolockcheck       — do not check for a running instance lock.
-	//   --convert-to pdf    — output format.
-	//   --outdir            — write the PDF to /tmp.
+	//   --nolockcheck        — do not check for a running instance lock.
+	//   --convert-to pdf     — output format.
+	//   --outdir             — write the PDF to /tmp.
 	//
 	// A per-invocation UserInstallation directory is set via
 	// -env:UserInstallation so that concurrent worker containers do not
-	// share LibreOffice profile state. Each container is ephemeral and
-	// isolated, so this is belt-and-suspenders, but it prevents any
-	// cross-contamination if the image is ever reused across requests.
+	// share LibreOffice profile state.
 	// -------------------------------------------------------------------------
-	userInstall := fmt.Sprintf("file:///tmp/lo-profile-%d", time.Now().UnixNano())
+	userInstall := fmt.Sprintf("file:///tmp/lo-profile-%d", os.Getpid())
 
 	cmd := exec.Command(
 		"/usr/lib/libreoffice/program/soffice",
@@ -67,8 +64,6 @@ func run() error {
 		inputPath,
 	)
 
-	// Direct LibreOffice stdout/stderr to our stderr so the Docker daemon
-	// captures it in container logs. We do not surface it to the API caller.
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
@@ -77,13 +72,15 @@ func run() error {
 	}
 
 	// -------------------------------------------------------------------------
-	// 4. Verify the output file was produced.
+	// 4. Rename LibreOffice output to the well-known path /tmp/output.pdf.
 	//
 	// LibreOffice derives the output filename from the input stem, so
-	// /tmp/input.docx → /tmp/input.pdf. We rename it to output.pdf so the
-	// API always knows where to find it regardless of the input extension.
+	// /input.docx → /tmp/input.pdf. We derive the stem dynamically from
+	// inputPath rather than hardcoding "input" so this works regardless of
+	// what filename the API chose.
 	// -------------------------------------------------------------------------
-	libreofficeOutput := filepath.Join(outputDir, "input.pdf")
+	stem := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+	libreofficeOutput := filepath.Join(outputDir, stem+".pdf")
 
 	if _, err := os.Stat(libreofficeOutput); err != nil {
 		return fmt.Errorf("libreoffice did not produce output at %s: %w", libreofficeOutput, err)
