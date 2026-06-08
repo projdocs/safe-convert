@@ -40,7 +40,6 @@ COPY --from=installer /lib/x86_64-linux-gnu       /lib/x86_64-linux-gnu
 
 # Copy the pre-built font cache — no tooling required in the runtime stage.
 COPY --from=installer /var/cache/fontconfig       /var/cache/fontconfig
-COPY --from=installer /root/.cache/fontconfig     /root/.cache/fontconfig
 
 RUN groupadd --gid 10001 svcgroup && \
     useradd \
