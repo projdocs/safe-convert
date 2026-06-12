@@ -135,9 +135,17 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Reconstruct the full reference the caller is requesting.
 		var requested string
-		if tag != "" && !strings.Contains(fromImage, "@") {
+		switch {
+		case strings.Contains(fromImage, "@"):
+			// fromImage already contains the digest, tag is irrelevant
+			requested = fromImage
+		case strings.HasPrefix(tag, "sha256:"):
+			// digest passed as tag — must use @ separator
+			requested = fromImage + "@" + tag
+		case tag != "":
+			// normal tag reference
 			requested = fromImage + ":" + tag
-		} else {
+		default:
 			requested = fromImage
 		}
 
