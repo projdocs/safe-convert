@@ -12,7 +12,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux \
     go build \
       -trimpath \
-      -ldflags="-s -w -X 'main.WorkerImage=${WORKER_IMAGE}'" \
+      -ldflags="-s -w -X 'github.com/projdocs/safe-convert/internal/docker.WorkerImage=${WORKER_IMAGE}'" \
       -o /proxy \
       ./cmd/proxy
 

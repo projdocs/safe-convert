@@ -152,11 +152,11 @@ All variables are read by `cmd/api` unless otherwise noted.
 ### HTTP Server
 
 | Variable | Required | Default | Constraints | Description |
-|---|---|---|---|---|
-| `SAFE_CONVERT_PORT` | No | `8080` | 1–65535 | Port the API listens on inside the container. |
-| `SAFE_CONVERT_READ_TIMEOUT_SECS` | No | `15` | 5–300 | Server read deadline. Defends against slow-loris attacks. |
-| `SAFE_CONVERT_WRITE_TIMEOUT_SECS` | No | `15` | 5–600 | Server write deadline for streaming the PDF response. **Must be strictly greater than `READ_TIMEOUT_SECS`.** |
-| `SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS` | No | `30` | 1–120 | Graceful shutdown window on `SIGTERM` before forced exit. |
+|---|---|---------|---|---|
+| `SAFE_CONVERT_PORT` | No | `8080`  | 1–65535 | Port the API listens on inside the container. |
+| `SAFE_CONVERT_READ_TIMEOUT_SECS` | No | `15`    | 5–300 | Server read deadline. Defends against slow-loris attacks. |
+| `SAFE_CONVERT_WRITE_TIMEOUT_SECS` | No | `30`    | 5–600 | Server write deadline for streaming the PDF response. **Must be strictly greater than `READ_TIMEOUT_SECS`.** |
+| `SAFE_CONVERT_SHUTDOWN_TIMEOUT_SECS` | No | `30`    | 1–120 | Graceful shutdown window on `SIGTERM` before forced exit. |
 
 ### File Handling
 
