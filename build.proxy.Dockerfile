@@ -17,14 +17,8 @@ RUN CGO_ENABLED=0 GOOS=linux \
       ./cmd/proxy
 
 # ── Stage 2: runtime ──────────────────────────────────────────────
-# FROM scratch — no shell, no OS, nothing but the static binary.
 FROM scratch
 
 COPY --from=builder /proxy /proxy
-
-# Proxy listens on 2375 by default.
-EXPOSE 2375
-
-USER 65534:65534
 
 ENTRYPOINT ["/proxy"]
